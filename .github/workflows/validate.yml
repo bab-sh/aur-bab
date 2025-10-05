@@ -2,9 +2,9 @@ name: Validate Package
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, development ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, development ]
   workflow_dispatch:
   repository_dispatch:
     types: [release-published]
@@ -18,13 +18,45 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  determine-target:
+    name: Determine Target Branch
+    runs-on: ubuntu-latest
+    outputs:
+      target_branch: ${{ steps.target.outputs.branch }}
+      is_prerelease: ${{ steps.target.outputs.is_prerelease }}
+    steps:
+      - name: Determine target branch
+        id: target
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            IS_PRERELEASE="${{ github.event.client_payload.prerelease }}"
+            if [ "$IS_PRERELEASE" = "true" ]; then
+              echo "branch=development" >> $GITHUB_OUTPUT
+              echo "is_prerelease=true" >> $GITHUB_OUTPUT
+              echo "::notice::Pre-release detected - targeting development branch"
+            else
+              echo "branch=main" >> $GITHUB_OUTPUT
+              echo "is_prerelease=false" >> $GITHUB_OUTPUT
+              echo "::notice::Stable release detected - targeting main branch"
+            fi
+          else
+            # For push/PR events, use the current branch
+            BRANCH="${{ github.ref_name }}"
+            echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+            echo "::notice::Using current branch: $BRANCH"
+          fi
+
   validate:
     name: Validate PKGBUILD
     runs-on: ubuntu-latest
+    needs: determine-target
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.determine-target.outputs.target_branch }}
 
       - name: Validate AUR package
         uses: hapakaien/archlinux-package-action@v2
@@ -36,12 +68,15 @@ jobs:
   srcinfo-check:
     name: Verify .SRCINFO Sync
     runs-on: ubuntu-latest
+    needs: determine-target
     container:
       image: archlinux:latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.determine-target.outputs.target_branch }}
 
       - name: Install dependencies
         run: |
@@ -66,10 +101,13 @@ jobs:
   metadata-check:
     name: Check Package Metadata
     runs-on: ubuntu-latest
+    needs: determine-target
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.determine-target.outputs.target_branch }}
 
       - name: Validate metadata completeness
         run: |
@@ -96,6 +134,7 @@ jobs:
   version-check:
     name: Check Version Consistency
     runs-on: ubuntu-latest
+    needs: determine-target
     outputs:
       version_mismatch: ${{ steps.compare.outputs.version_mismatch }}
       pkgbuild_version: ${{ steps.compare.outputs.pkgbuild_version }}
@@ -104,20 +143,31 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.determine-target.outputs.target_branch }}
 
       - name: Get latest release version
         id: release
         run: |
-          LATEST_RELEASE=$(curl -s "https://api.github.com/repos/bab-sh/bab/releases/latest" | jq -r '.tag_name // empty')
-          
-          if [ -z "$LATEST_RELEASE" ]; then
-            echo "::warning::No releases found in repository"
-            echo "version=" >> $GITHUB_OUTPUT
-          else
-            # Remove 'v' prefix if present
-            VERSION=${LATEST_RELEASE#v}
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            # Use the version from the dispatch payload
+            VERSION="${{ github.event.client_payload.version }}"
+            VERSION=${VERSION#v}
             echo "version=$VERSION" >> $GITHUB_OUTPUT
-            echo "::notice::Latest release version: $VERSION"
+            echo "::notice::Dispatch release version: $VERSION"
+          else
+            # Fetch latest release from API
+            LATEST_RELEASE=$(curl -s "https://api.github.com/repos/bab-sh/bab/releases/latest" | jq -r '.tag_name // empty')
+          
+            if [ -z "$LATEST_RELEASE" ]; then
+              echo "::warning::No releases found in repository"
+              echo "version=" >> $GITHUB_OUTPUT
+            else
+              # Remove 'v' prefix if present
+              VERSION=${LATEST_RELEASE#v}
+              echo "version=$VERSION" >> $GITHUB_OUTPUT
+              echo "::notice::Latest release version: $VERSION"
+            fi
           fi
 
       - name: Get PKGBUILD version
@@ -163,6 +213,7 @@ jobs:
   checksum-check:
     name: Verify Checksums
     runs-on: ubuntu-latest
+    needs: determine-target
     container:
       image: archlinux:latest
     outputs:
@@ -171,6 +222,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.determine-target.outputs.target_branch }}
 
       - name: Install dependencies
         run: |
@@ -211,7 +264,7 @@ jobs:
   auto-update:
     name: Auto-Update PKGBUILD
     runs-on: ubuntu-latest
-    needs: [version-check, checksum-check]
+    needs: [determine-target, version-check, checksum-check]
     if: |
       always() && 
       (needs.version-check.outputs.version_mismatch == 'true' || 
@@ -220,6 +273,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.determine-target.outputs.target_branch }}
 
       - name: Update PKGBUILD files
         run: |
@@ -254,16 +309,23 @@ jobs:
         run: |
           VERSION_MISMATCH="${{ needs.version-check.outputs.version_mismatch }}"
           CHECKSUM_NEEDS_UPDATE="${{ needs.checksum-check.outputs.needs_update }}"
+          IS_PRERELEASE="${{ needs.determine-target.outputs.is_prerelease }}"
+          
+          # Add prerelease indicator to branch and title if applicable
+          PRERELEASE_PREFIX=""
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            PRERELEASE_PREFIX="pre-"
+          fi
           
           if [ "$VERSION_MISMATCH" = "true" ] && [ "$CHECKSUM_NEEDS_UPDATE" = "true" ]; then
-            echo "title=📦 Update PKGBUILD version and checksums" >> $GITHUB_OUTPUT
-            echo "branch=update-version-checksums-${{ github.run_number }}" >> $GITHUB_OUTPUT
+            echo "title=📦 Update PKGBUILD version and checksums$( [ '$IS_PRERELEASE' = 'true' ] && echo ' (pre-release)' || echo '' )" >> $GITHUB_OUTPUT
+            echo "branch=${PRERELEASE_PREFIX}update-version-checksums-${{ github.run_number }}" >> $GITHUB_OUTPUT
           elif [ "$VERSION_MISMATCH" = "true" ]; then
-            echo "title=📦 Update PKGBUILD to version ${{ needs.version-check.outputs.release_version }}" >> $GITHUB_OUTPUT
-            echo "branch=update-version-${{ needs.version-check.outputs.release_version }}-${{ github.run_number }}" >> $GITHUB_OUTPUT
+            echo "title=📦 Update PKGBUILD to version ${{ needs.version-check.outputs.release_version }}$( [ '$IS_PRERELEASE' = 'true' ] && echo ' (pre-release)' || echo '' )" >> $GITHUB_OUTPUT
+            echo "branch=${PRERELEASE_PREFIX}update-version-${{ needs.version-check.outputs.release_version }}-${{ github.run_number }}" >> $GITHUB_OUTPUT
           else
-            echo "title=🔐 Update package checksums" >> $GITHUB_OUTPUT
-            echo "branch=update-checksums-${{ github.run_number }}" >> $GITHUB_OUTPUT
+            echo "title=🔐 Update package checksums$( [ '$IS_PRERELEASE' = 'true' ] && echo ' (pre-release)' || echo '' )" >> $GITHUB_OUTPUT
+            echo "branch=${PRERELEASE_PREFIX}update-checksums-${{ github.run_number }}" >> $GITHUB_OUTPUT
           fi
 
       - name: Create Pull Request
@@ -271,8 +333,9 @@ jobs:
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.PAT_TOKEN }}
+          base: ${{ needs.determine-target.outputs.target_branch }}
           commit-message: |
-            chore: update PKGBUILD${{ needs.version-check.outputs.version_mismatch == 'true' && format(' to version {0}', needs.version-check.outputs.release_version) || '' }}
+            chore: update PKGBUILD${{ needs.version-check.outputs.version_mismatch == 'true' && format(' to version {0}', needs.version-check.outputs.release_version) || '' }}${{ needs.determine-target.outputs.is_prerelease == 'true' && ' (pre-release)' || '' }}
             
             ${{ needs.version-check.outputs.version_mismatch == 'true' && format('- Updated pkgver to {0}', needs.version-check.outputs.release_version) || '' }}
             ${{ needs.version-check.outputs.version_mismatch == 'true' && '- Reset pkgrel to 1' || '' }}
@@ -287,6 +350,10 @@ jobs:
             
             This PR automatically updates the PKGBUILD based on validation failures.
             
+            ${{ needs.determine-target.outputs.is_prerelease == 'true' && '> **ℹ️ Pre-release Update**
+            > This update is for a pre-release version and targets the `development` branch.
+            
+            ' || '' }}
             ### Changes Made
             
             ${{ needs.version-check.outputs.version_mismatch == 'true' && format('#### 📦 Version Update
@@ -313,6 +380,7 @@ jobs:
             automated
             ${{ needs.version-check.outputs.version_mismatch == 'true' && 'version-update' || '' }}
             ${{ needs.checksum-check.outputs.needs_update == 'true' && 'checksums' || '' }}
+            ${{ needs.determine-target.outputs.is_prerelease == 'true' && 'pre-release' || '' }}
 
       - name: Enable Pull Request Automerge
         if: steps.cpr.outputs.pull-request-operation == 'created'
@@ -323,12 +391,15 @@ jobs:
   summary:
     name: Validation Summary
     runs-on: ubuntu-latest
-    needs: [validate, srcinfo-check, metadata-check, version-check, checksum-check, auto-update]
+    needs: [determine-target, validate, srcinfo-check, metadata-check, version-check, checksum-check, auto-update]
     if: always()
 
     steps:
       - name: Check all jobs status
         run: |
+          echo "::notice::Target branch: ${{ needs.determine-target.outputs.target_branch }}"
+          echo "::notice::Is pre-release: ${{ needs.determine-target.outputs.is_prerelease }}"
+          
           # Check if auto-update ran successfully (meaning there was something to fix)
           if [ "${{ needs.auto-update.result }}" = "success" ]; then
             echo "::notice::Automated update PR created successfully"
