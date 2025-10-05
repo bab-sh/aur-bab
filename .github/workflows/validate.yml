@@ -251,6 +251,9 @@ jobs:
             sudo -u builder makepkg --syncdeps --noconfirm --log
           '
           
+          # Fix permissions - Docker runs as root and creates root-owned files
+          sudo chown -R $USER:$USER .
+          
           echo "::notice::PKGBUILD updated and verified"
 
       - name: Generate PR details
