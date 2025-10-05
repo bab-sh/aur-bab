@@ -51,6 +51,8 @@ jobs:
     name: Validate PKGBUILD
     runs-on: ubuntu-latest
     needs: determine-target
+    container:
+      image: archlinux:latest
 
     steps:
       - name: Checkout repository
@@ -58,12 +60,42 @@ jobs:
         with:
           ref: ${{ needs.determine-target.outputs.target_branch }}
 
-      - name: Validate AUR package
-        uses: heyhusen/archlinux-package-action@v2
-        with:
-          namcap: true
-          updpkgsums: false
-          flags: --syncdeps --noconfirm --log
+      - name: Setup build environment
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel namcap git sudo
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+          chown -R builder:builder .
+
+      - name: Validate PKGBUILD syntax
+        run: |
+          sudo -u builder bash -c '
+            set -e
+            source PKGBUILD
+            echo "Package: $pkgname"
+            echo "Version: $pkgver-$pkgrel"
+            echo "Architecture: ${arch[@]}"
+          '
+
+      - name: Check PKGBUILD with namcap
+        run: sudo -u builder namcap PKGBUILD
+        continue-on-error: true
+
+      - name: Build package
+        run: sudo -u builder makepkg --syncdeps --noconfirm --log
+
+      - name: Check built package with namcap
+        run: sudo -u builder namcap *.pkg.tar.zst
+        continue-on-error: true
+
+      - name: Test package installation
+        run: pacman -U --noconfirm *.pkg.tar.zst
+
+      - name: Verify installed files
+        run: |
+          PKGNAME=$(sudo -u builder bash -c 'source PKGBUILD && echo $pkgname')
+          pacman -Ql "$PKGNAME"
 
   srcinfo-check:
     name: Verify .SRCINFO Sync
