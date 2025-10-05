@@ -31,14 +31,6 @@ jobs:
           updpkgsums: false
           flags: --syncdeps --noconfirm --log
 
-      - name: Upload build logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs-${{ github.sha }}
-          path: '*.log'
-          retention-days: 14
-
   srcinfo-check:
     name: Verify .SRCINFO Sync
     runs-on: ubuntu-latest
