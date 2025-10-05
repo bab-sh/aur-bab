@@ -365,6 +365,8 @@ jobs:
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.PAT_TOKEN }}
+          committer: github-actions[bot] <github-actions[bot]@users.noreply.github.com>
+          author: github-actions[bot] <github-actions[bot]@users.noreply.github.com>
           base: ${{ needs.determine-target.outputs.target_branch }}
           commit-message: |
             chore: update PKGBUILD${{ needs.version-check.outputs.version_mismatch == 'true' && format(' to version {0}', needs.version-check.outputs.release_version) || '' }}${{ needs.determine-target.outputs.is_prerelease == 'true' && ' (pre-release)' || '' }}
