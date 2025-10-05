@@ -1,0 +1,35 @@
+name: Release to AUR
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'PKGBUILD'
+      - '.SRCINFO'
+
+jobs:
+  release-aur:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get package version
+        id: get_version
+        run: |
+          VERSION=$(grep '^pkgver=' PKGBUILD | cut -d'=' -f2)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v3.0.1
+        with:
+          pkgname: bab
+          pkgbuild: ./PKGBUILD
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to version ${{ steps.get_version.outputs.version }}"
+          ssh_keyscan_types: rsa,ecdsa,ed25519
