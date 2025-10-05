@@ -9,7 +9,7 @@ license=('MIT')
 depends=()
 makedepends=('go>=1.25.1')
 source=("${pkgname}-${pkgver}.tar.gz::https://github.com/bab-sh/bab/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('c1b7b551733e4e81d8a6fc4976a88c59702f1cc324c765375e8a50a31b78311e')
+sha256sums=('f070289e60a9821ac8f0c79cb9edd65be1e64bc24d56070e2e0bceb944b19769')
 
 prepare() {
     cd "${pkgname}-${pkgver}"
