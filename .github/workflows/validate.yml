@@ -1,0 +1,220 @@
+name: Validate Package
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate PKGBUILD
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate AUR package
+        uses: hapakaien/archlinux-package-action@v2
+        with:
+          namcap: true
+          updpkgsums: false
+          makepkgArgs: --syncdeps --noconfirm --log
+          namcapRules: |
+            package
+            !pkgbuild-variable-not-array
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.sha }}
+          path: '*.log'
+          retention-days: 14
+
+  srcinfo-check:
+    name: Verify .SRCINFO Sync
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel diffutils
+
+      - name: Verify .SRCINFO sync
+        run: |
+          useradd -m builder
+          chown -R builder:builder .
+          
+          sudo -u builder makepkg --printsrcinfo > .SRCINFO.generated
+          
+          if ! diff -u .SRCINFO .SRCINFO.generated; then
+            echo "::error::.SRCINFO is out of sync with PKGBUILD"
+            echo "::notice::Run 'makepkg --printsrcinfo > .SRCINFO' to update"
+            exit 1
+          fi
+          
+          echo "::notice::.SRCINFO is correctly synchronized"
+
+  metadata-check:
+    name: Check Package Metadata
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate metadata completeness
+        run: |
+          REQUIRED_FIELDS=("pkgname" "pkgver" "pkgrel" "pkgdesc" "arch" "url" "license")
+          
+          for field in "${REQUIRED_FIELDS[@]}"; do
+            if ! grep -q "^${field}=" PKGBUILD; then
+              echo "::error::Missing required field: ${field}"
+              exit 1
+            fi
+          done
+          
+          if ! grep -q "^# Maintainer:" PKGBUILD; then
+            echo "::warning::No maintainer information found"
+          fi
+          
+          VERSION=$(grep '^pkgver=' PKGBUILD | cut -d'=' -f2)
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::warning::Version $VERSION doesn't follow semantic versioning"
+          fi
+          
+          echo "::notice::Metadata validation passed"
+
+  checksum-check:
+    name: Verify & Update Checksums
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    outputs:
+      needs_update: ${{ steps.check.outputs.needs_update }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel pacman-contrib git diffutils
+
+      - name: Check and update checksums
+        id: check
+        run: |
+          useradd -m builder
+          chown -R builder:builder .
+          
+          cp PKGBUILD PKGBUILD.backup
+          
+          sudo -u builder updpkgsums
+          
+          if ! diff -u PKGBUILD.backup PKGBUILD; then
+            echo "needs_update=true" >> $GITHUB_OUTPUT
+            echo "::warning::Checksums in PKGBUILD are outdated"
+            echo "::notice::Creating PR with updated checksums"
+          
+            PKGVER=$(grep '^pkgver=' PKGBUILD | cut -d'=' -f2)
+            PKGREL=$(grep '^pkgrel=' PKGBUILD | cut -d'=' -f2)
+            echo "version=${PKGVER}-${PKGREL}" >> $GITHUB_OUTPUT
+          
+            # Show changes
+            echo "## Checksum Updates" >> $GITHUB_STEP_SUMMARY
+            echo '```diff' >> $GITHUB_STEP_SUMMARY
+            diff -u PKGBUILD.backup PKGBUILD >> $GITHUB_STEP_SUMMARY || true
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "needs_update=false" >> $GITHUB_OUTPUT
+            echo "::notice::Checksums are up to date ✓"
+          fi
+
+      - name: Update .SRCINFO
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          sudo -u builder makepkg --printsrcinfo > .SRCINFO
+          echo "::notice::.SRCINFO updated"
+
+      - name: Verify package still builds
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          sudo -u builder makepkg --syncdeps --noconfirm --log
+          echo "::notice::Package builds successfully with updated checksums ✓"
+
+      - name: Create Pull Request
+        if: steps.check.outputs.needs_update == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: |
+            chore: update package checksums
+            
+            Updated checksums for version ${{ steps.check.outputs.version }}
+            - Regenerated checksums with updpkgsums
+            - Updated .SRCINFO
+            - Verified package builds successfully
+          branch: update-checksums-${{ github.run_number }}
+          delete-branch: true
+          title: "🔐 Update package checksums"
+          body: |
+            ## 🔐 Checksum Update
+            
+            This PR updates the package checksums to ensure integrity of downloaded sources.
+            
+            ### 📦 Package Version
+            **Version:** `${{ steps.check.outputs.version }}`
+            ---
+            
+            <sub>🤖 This PR was automatically created during validation</sub>
+          labels: |
+            automated
+            checksums
+
+  summary:
+    name: Validation Summary
+    runs-on: ubuntu-latest
+    needs: [validate, srcinfo-check, metadata-check, checksum-check]
+    if: always()
+
+    steps:
+      - name: Check all jobs status
+        run: |
+          # Checksum job is allowed to "fail" if it created a PR
+          if [ "${{ needs.checksum-check.outputs.needs_update }}" = "true" ]; then
+            echo "::notice::Checksums needed updating"
+            CHECKSUM_OK=true
+          elif [ "${{ needs.checksum-check.result }}" = "success" ]; then
+            CHECKSUM_OK=true
+          else
+            CHECKSUM_OK=false
+          fi
+          
+          if [ "${{ needs.validate.result }}" != "success" ] || \
+             [ "${{ needs.srcinfo-check.result }}" != "success" ] || \
+             [ "${{ needs.metadata-check.result }}" != "success" ] || \
+             [ "$CHECKSUM_OK" != "true" ]; then
+            echo "::error::Some validation checks failed"
+            exit 1
+          fi
+          
+          echo "::notice::All validation checks passed! ✓"

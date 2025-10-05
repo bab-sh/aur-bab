@@ -6,7 +6,7 @@ pkgbase = bab
 	arch = x86_64
 	arch = aarch64
 	license = MIT
-	makedepends = go>=1.25
+	makedepends = go>=1.25.1
 	source = bab-0.0.2.tar.gz::https://github.com/bab-sh/bab/archive/refs/tags/v0.0.2.tar.gz
 	sha256sums = 532b4b11a016c84e6b68006af27a5e44576044d1b31238769a0f593b65d79311
 

@@ -10,3 +10,4 @@ pkg/
 
 # Log files
 *.log
+/.idea
