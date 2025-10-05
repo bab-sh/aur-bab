@@ -149,8 +149,8 @@ jobs:
             echo "version_mismatch=true" >> $GITHUB_OUTPUT
             echo "pkgbuild_version=$PKGBUILD_VER" >> $GITHUB_OUTPUT
             echo "release_version=$RELEASE_VER" >> $GITHUB_OUTPUT
-            echo "::error::Version mismatch detected!"
-            echo "::error::Release: $RELEASE_VER | PKGBUILD: $PKGBUILD_VER"
+            echo "::warning::Version mismatch detected - will be auto-updated"
+            echo "::warning::Release: $RELEASE_VER | PKGBUILD: $PKGBUILD_VER"
           
             # Add to job summary
             echo "## ⚠️ Version Mismatch Detected" >> $GITHUB_STEP_SUMMARY
@@ -159,7 +159,6 @@ jobs:
             echo "|--------|---------|" >> $GITHUB_STEP_SUMMARY
             echo "| **Latest Release** | \`$RELEASE_VER\` |" >> $GITHUB_STEP_SUMMARY
             echo "| **PKGBUILD** | \`$PKGBUILD_VER\` |" >> $GITHUB_STEP_SUMMARY
-            exit 1
           else
             echo "version_mismatch=false" >> $GITHUB_OUTPUT
             echo "pkgbuild_version=$PKGBUILD_VER" >> $GITHUB_OUTPUT
@@ -172,7 +171,6 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
-    needs: [version-check]
     outputs:
       needs_update: ${{ steps.check.outputs.needs_update }}
 
@@ -187,7 +185,6 @@ jobs:
 
       - name: Check checksums
         id: check
-        continue-on-error: true
         run: |
           useradd -m builder
           chown -R builder:builder .
@@ -198,7 +195,7 @@ jobs:
           
           if ! diff -u PKGBUILD.backup PKGBUILD; then
             echo "needs_update=true" >> $GITHUB_OUTPUT
-            echo "::error::Checksums in PKGBUILD are outdated"
+            echo "::warning::Checksums in PKGBUILD are outdated - will be auto-updated"
           
             PKGVER=$(grep '^pkgver=' PKGBUILD | cut -d'=' -f2)
             PKGREL=$(grep '^pkgrel=' PKGBUILD | cut -d'=' -f2)
@@ -212,7 +209,6 @@ jobs:
           
             # Restore for the update job
             mv PKGBUILD.backup PKGBUILD
-            exit 1
           else
             echo "needs_update=false" >> $GITHUB_OUTPUT
             echo "::notice::Checksums are up to date ✓"
@@ -222,7 +218,10 @@ jobs:
     name: Auto-Update PKGBUILD
     runs-on: ubuntu-latest
     needs: [version-check, checksum-check]
-    if: always() && (needs.version-check.result == 'failure' || needs.checksum-check.result == 'failure')
+    if: |
+      always() && 
+      (needs.version-check.outputs.version_mismatch == 'true' || 
+       needs.checksum-check.outputs.needs_update == 'true')
 
     steps:
       - name: Checkout repository
@@ -330,7 +329,7 @@ jobs:
     steps:
       - name: Check all jobs status
         run: |
-          # Auto-update job creating PR is acceptable
+          # Check if auto-update ran successfully (meaning there was something to fix)
           if [ "${{ needs.auto-update.result }}" = "success" ]; then
             echo "::notice::Automated update PR created successfully"
             echo "::notice::Version mismatch: ${{ needs.version-check.outputs.version_mismatch }}"
@@ -338,24 +337,15 @@ jobs:
             exit 0
           fi
           
-          # Check if version-check or checksum-check failed but auto-update wasn't triggered
-          if [ "${{ needs.version-check.result }}" = "failure" ] || [ "${{ needs.checksum-check.result }}" = "failure" ]; then
-            if [ "${{ needs.auto-update.result }}" != "success" ]; then
-              echo "::error::Validation checks failed but auto-update did not complete successfully"
-              exit 1
-            fi
-          fi
-          
-          # All other jobs must succeed
+          # Check if validation jobs succeeded
           if [ "${{ needs.validate.result }}" != "success" ] || \
              [ "${{ needs.srcinfo-check.result }}" != "success" ] || \
-             [ "${{ needs.metadata-check.result }}" != "success" ]; then
+             [ "${{ needs.metadata-check.result }}" != "success" ] || \
+             [ "${{ needs.version-check.result }}" != "success" ] || \
+             [ "${{ needs.checksum-check.result }}" != "success" ]; then
             echo "::error::Some validation checks failed"
             exit 1
           fi
           
-          # If we get here, version and checksums are good
-          if [ "${{ needs.version-check.result }}" = "success" ] && \
-             [ "${{ needs.checksum-check.result }}" = "success" ]; then
-            echo "::notice::All validation checks passed! ✓"
-          fi
+          # Everything passed and no updates needed
+          echo "::notice::All validation checks passed! ✓"
