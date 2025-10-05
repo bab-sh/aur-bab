@@ -29,10 +29,7 @@ jobs:
         with:
           namcap: true
           updpkgsums: false
-          makepkgArgs: --syncdeps --noconfirm --log
-          namcapRules: |
-            package
-            !pkgbuild-variable-not-array
+          flags: --syncdeps --noconfirm --log
 
       - name: Upload build logs
         if: always()
