@@ -99,11 +99,80 @@ jobs:
           
           echo "::notice::Metadata validation passed"
 
+  version-check:
+    name: Check Version Consistency
+    runs-on: ubuntu-latest
+    outputs:
+      version_mismatch: ${{ steps.compare.outputs.version_mismatch }}
+      pkgbuild_version: ${{ steps.compare.outputs.pkgbuild_version }}
+      release_version: ${{ steps.compare.outputs.release_version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get latest release version
+        id: release
+        run: |
+          LATEST_RELEASE=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/latest" | jq -r '.tag_name // empty')
+          
+          if [ -z "$LATEST_RELEASE" ]; then
+            echo "::warning::No releases found in repository"
+            echo "version=" >> $GITHUB_OUTPUT
+          else
+            # Remove 'v' prefix if present
+            VERSION=${LATEST_RELEASE#v}
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "::notice::Latest release version: $VERSION"
+          fi
+
+      - name: Get PKGBUILD version
+        id: pkgbuild
+        run: |
+          PKGVER=$(grep '^pkgver=' PKGBUILD | cut -d'=' -f2)
+          PKGREL=$(grep '^pkgrel=' PKGBUILD | cut -d'=' -f2)
+          echo "version=${PKGVER}" >> $GITHUB_OUTPUT
+          echo "pkgrel=${PKGREL}" >> $GITHUB_OUTPUT
+          echo "full_version=${PKGVER}-${PKGREL}" >> $GITHUB_OUTPUT
+          echo "::notice::PKGBUILD version: ${PKGVER}-${PKGREL}"
+
+      - name: Compare versions
+        id: compare
+        run: |
+          RELEASE_VER="${{ steps.release.outputs.version }}"
+          PKGBUILD_VER="${{ steps.pkgbuild.outputs.version }}"
+          
+          if [ -z "$RELEASE_VER" ]; then
+            echo "version_mismatch=false" >> $GITHUB_OUTPUT
+            echo "::notice::No release to compare against"
+          elif [ "$RELEASE_VER" != "$PKGBUILD_VER" ]; then
+            echo "version_mismatch=true" >> $GITHUB_OUTPUT
+            echo "pkgbuild_version=$PKGBUILD_VER" >> $GITHUB_OUTPUT
+            echo "release_version=$RELEASE_VER" >> $GITHUB_OUTPUT
+            echo "::error::Version mismatch detected!"
+            echo "::error::Release: $RELEASE_VER | PKGBUILD: $PKGBUILD_VER"
+          
+            # Add to job summary
+            echo "## ⚠️ Version Mismatch Detected" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Source | Version |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|---------|" >> $GITHUB_STEP_SUMMARY
+            echo "| **Latest Release** | \`$RELEASE_VER\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| **PKGBUILD** | \`$PKGBUILD_VER\` |" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          else
+            echo "version_mismatch=false" >> $GITHUB_OUTPUT
+            echo "pkgbuild_version=$PKGBUILD_VER" >> $GITHUB_OUTPUT
+            echo "release_version=$RELEASE_VER" >> $GITHUB_OUTPUT
+            echo "::notice::Versions are in sync ✓"
+          fi
+
   checksum-check:
-    name: Verify & Update Checksums
+    name: Verify Checksums
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
+    needs: [version-check]
     outputs:
       needs_update: ${{ steps.check.outputs.needs_update }}
 
@@ -116,8 +185,9 @@ jobs:
           pacman -Syu --noconfirm
           pacman -S --noconfirm base-devel pacman-contrib git diffutils
 
-      - name: Check and update checksums
+      - name: Check checksums
         id: check
+        continue-on-error: true
         run: |
           useradd -m builder
           chown -R builder:builder .
@@ -128,90 +198,195 @@ jobs:
           
           if ! diff -u PKGBUILD.backup PKGBUILD; then
             echo "needs_update=true" >> $GITHUB_OUTPUT
-            echo "::warning::Checksums in PKGBUILD are outdated"
-            echo "::notice::Creating PR with updated checksums"
+            echo "::error::Checksums in PKGBUILD are outdated"
           
             PKGVER=$(grep '^pkgver=' PKGBUILD | cut -d'=' -f2)
             PKGREL=$(grep '^pkgrel=' PKGBUILD | cut -d'=' -f2)
             echo "version=${PKGVER}-${PKGREL}" >> $GITHUB_OUTPUT
           
             # Show changes
-            echo "## Checksum Updates" >> $GITHUB_STEP_SUMMARY
+            echo "## ⚠️ Checksum Mismatch" >> $GITHUB_STEP_SUMMARY
             echo '```diff' >> $GITHUB_STEP_SUMMARY
             diff -u PKGBUILD.backup PKGBUILD >> $GITHUB_STEP_SUMMARY || true
             echo '```' >> $GITHUB_STEP_SUMMARY
+          
+            # Restore for the update job
+            mv PKGBUILD.backup PKGBUILD
+            exit 1
           else
             echo "needs_update=false" >> $GITHUB_OUTPUT
             echo "::notice::Checksums are up to date ✓"
           fi
 
+  auto-update:
+    name: Auto-Update PKGBUILD
+    runs-on: ubuntu-latest
+    needs: [version-check, checksum-check]
+    if: always() && (needs.version-check.result == 'failure' || needs.checksum-check.result == 'failure')
+    container:
+      image: archlinux:latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel pacman-contrib git diffutils
+
+      - name: Determine what needs updating
+        id: changes
+        run: |
+          VERSION_MISMATCH="${{ needs.version-check.outputs.version_mismatch }}"
+          CHECKSUM_NEEDS_UPDATE="${{ needs.checksum-check.outputs.needs_update }}"
+          
+          echo "version_mismatch=$VERSION_MISMATCH" >> $GITHUB_OUTPUT
+          echo "checksum_needs_update=$CHECKSUM_NEEDS_UPDATE" >> $GITHUB_OUTPUT
+          
+          if [ "$VERSION_MISMATCH" = "true" ]; then
+            echo "::notice::Will update version"
+          fi
+          if [ "$CHECKSUM_NEEDS_UPDATE" = "true" ]; then
+            echo "::notice::Will update checksums"
+          fi
+
+      - name: Update PKGBUILD version
+        if: needs.version-check.outputs.version_mismatch == 'true'
+        run: |
+          NEW_VERSION="${{ needs.version-check.outputs.release_version }}"
+          
+          # Update pkgver in PKGBUILD
+          sed -i "s/^pkgver=.*/pkgver=$NEW_VERSION/" PKGBUILD
+          
+          # Reset pkgrel to 1 for new version
+          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          
+          echo "::notice::Updated PKGBUILD to version $NEW_VERSION-1"
+
+      - name: Update checksums
+        run: |
+          useradd -m builder
+          chown -R builder:builder .
+          sudo -u builder updpkgsums
+          echo "::notice::Checksums updated"
+
       - name: Update .SRCINFO
-        if: steps.check.outputs.needs_update == 'true'
         run: |
           sudo -u builder makepkg --printsrcinfo > .SRCINFO
           echo "::notice::.SRCINFO updated"
 
-      - name: Verify package still builds
-        if: steps.check.outputs.needs_update == 'true'
+      - name: Verify package builds
         run: |
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
           sudo -u builder makepkg --syncdeps --noconfirm --log
-          echo "::notice::Package builds successfully with updated checksums ✓"
+          echo "::notice::Package builds successfully ✓"
+
+      - name: Generate PR details
+        id: pr_details
+        run: |
+          VERSION_MISMATCH="${{ needs.version-check.outputs.version_mismatch }}"
+          CHECKSUM_NEEDS_UPDATE="${{ needs.checksum-check.outputs.needs_update }}"
+          
+          if [ "$VERSION_MISMATCH" = "true" ] && [ "$CHECKSUM_NEEDS_UPDATE" = "true" ]; then
+            TITLE="📦 Update PKGBUILD version and checksums"
+            BRANCH="update-version-checksums-${{ github.run_number }}"
+            echo "type=version-and-checksums" >> $GITHUB_OUTPUT
+          elif [ "$VERSION_MISMATCH" = "true" ]; then
+            TITLE="📦 Update PKGBUILD to version ${{ needs.version-check.outputs.release_version }}"
+            BRANCH="update-version-${{ needs.version-check.outputs.release_version }}-${{ github.run_number }}"
+            echo "type=version-only" >> $GITHUB_OUTPUT
+          else
+            TITLE="🔐 Update package checksums"
+            BRANCH="update-checksums-${{ github.run_number }}"
+            echo "type=checksums-only" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "title=$TITLE" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
 
       - name: Create Pull Request
-        if: steps.check.outputs.needs_update == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: |
-            chore: update package checksums
+            chore: update PKGBUILD${{ needs.version-check.outputs.version_mismatch == 'true' && format(' to version {0}', needs.version-check.outputs.release_version) || '' }}
             
-            Updated checksums for version ${{ steps.check.outputs.version }}
-            - Regenerated checksums with updpkgsums
+            ${{ needs.version-check.outputs.version_mismatch == 'true' && format('- Updated pkgver to {0}', needs.version-check.outputs.release_version) || '' }}
+            ${{ needs.version-check.outputs.version_mismatch == 'true' && '- Reset pkgrel to 1' || '' }}
+            - ${{ needs.checksum-check.outputs.needs_update == 'true' && 'Updated' || 'Regenerated' }} checksums with updpkgsums
             - Updated .SRCINFO
             - Verified package builds successfully
-          branch: update-checksums-${{ github.run_number }}
+          branch: ${{ steps.pr_details.outputs.branch }}
           delete-branch: true
-          title: "🔐 Update package checksums"
+          title: ${{ steps.pr_details.outputs.title }}
           body: |
-            ## 🔐 Checksum Update
+            ## 🔄 Automated PKGBUILD Update
             
-            This PR updates the package checksums to ensure integrity of downloaded sources.
+            This PR automatically updates the PKGBUILD based on validation failures.
             
-            ### 📦 Package Version
-            **Version:** `${{ steps.check.outputs.version }}`
+            ### Changes Made
+            
+            ${{ needs.version-check.outputs.version_mismatch == 'true' && format('#### 📦 Version Update
+            - **Previous version:** `{0}`
+            - **New version:** `{1}-1`
+            - **Source:** Latest GitHub release (`v{1}`)
+            ', needs.version-check.outputs.pkgbuild_version, needs.version-check.outputs.release_version) || '' }}
+            
+            ${{ needs.checksum-check.outputs.needs_update == 'true' && '#### 🔐 Checksum Update
+            - Checksums were outdated and have been regenerated
+            ' || '' }}
+            
+            #### ✅ Validation
+            - ${{ needs.version-check.outputs.version_mismatch == 'true' && format('✅ Updated `pkgver` to `{0}`', needs.version-check.outputs.release_version) || '✅ Version already up to date' }}
+            - ${{ needs.version-check.outputs.version_mismatch == 'true' && '✅ Reset `pkgrel` to `1`' || '' }}
+            - ✅ Updated checksums with `updpkgsums`
+            - ✅ Regenerated `.SRCINFO`
+            - ✅ Verified package builds successfully
+            
             ---
             
-            <sub>🤖 This PR was automatically created during validation</sub>
+            <sub>🤖 This PR was automatically created by the validation workflow</sub>
           labels: |
             automated
-            checksums
+            ${{ needs.version-check.outputs.version_mismatch == 'true' && 'version-update' || '' }}
+            ${{ needs.checksum-check.outputs.needs_update == 'true' && 'checksums' || '' }}
 
   summary:
     name: Validation Summary
     runs-on: ubuntu-latest
-    needs: [validate, srcinfo-check, metadata-check, checksum-check]
+    needs: [validate, srcinfo-check, metadata-check, version-check, checksum-check, auto-update]
     if: always()
 
     steps:
       - name: Check all jobs status
         run: |
-          # Checksum job is allowed to "fail" if it created a PR
-          if [ "${{ needs.checksum-check.outputs.needs_update }}" = "true" ]; then
-            echo "::notice::Checksums needed updating"
-            CHECKSUM_OK=true
-          elif [ "${{ needs.checksum-check.result }}" = "success" ]; then
-            CHECKSUM_OK=true
-          else
-            CHECKSUM_OK=false
+          # Auto-update job creating PR is acceptable
+          if [ "${{ needs.auto-update.result }}" = "success" ]; then
+            echo "::notice::Automated update PR created successfully"
+            echo "::notice::Version mismatch: ${{ needs.version-check.outputs.version_mismatch }}"
+            echo "::notice::Checksum needs update: ${{ needs.checksum-check.outputs.needs_update }}"
+            exit 0
           fi
           
+          # Check if version-check or checksum-check failed but auto-update wasn't triggered
+          if [ "${{ needs.version-check.result }}" = "failure" ] || [ "${{ needs.checksum-check.result }}" = "failure" ]; then
+            if [ "${{ needs.auto-update.result }}" != "success" ]; then
+              echo "::error::Validation checks failed but auto-update did not complete successfully"
+              exit 1
+            fi
+          fi
+          
+          # All other jobs must succeed
           if [ "${{ needs.validate.result }}" != "success" ] || \
              [ "${{ needs.srcinfo-check.result }}" != "success" ] || \
-             [ "${{ needs.metadata-check.result }}" != "success" ] || \
-             [ "$CHECKSUM_OK" != "true" ]; then
+             [ "${{ needs.metadata-check.result }}" != "success" ]; then
             echo "::error::Some validation checks failed"
             exit 1
           fi
           
-          echo "::notice::All validation checks passed! ✓"
+          # If we get here, version and checksums are good
+          if [ "${{ needs.version-check.result }}" = "success" ] && \
+             [ "${{ needs.checksum-check.result }}" = "success" ]; then
+            echo "::notice::All validation checks passed! ✓"
+          fi
