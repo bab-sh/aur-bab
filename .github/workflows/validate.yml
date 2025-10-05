@@ -21,7 +21,6 @@ jobs:
   determine-target:
     name: Determine Target Branch
     runs-on: ubuntu-latest
-    if: github.actor != 'github-actions[bot]' || github.event_name == 'repository_dispatch'
     outputs:
       target_branch: ${{ steps.target.outputs.branch }}
       is_prerelease: ${{ steps.target.outputs.is_prerelease }}
