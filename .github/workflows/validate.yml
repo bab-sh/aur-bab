@@ -223,64 +223,35 @@ jobs:
     runs-on: ubuntu-latest
     needs: [version-check, checksum-check]
     if: always() && (needs.version-check.result == 'failure' || needs.checksum-check.result == 'failure')
-    container:
-      image: archlinux:latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Update PKGBUILD files
         run: |
-          pacman -Syu --noconfirm
-          pacman -S --noconfirm base-devel pacman-contrib git diffutils
-
-      - name: Determine what needs updating
-        id: changes
-        run: |
-          VERSION_MISMATCH="${{ needs.version-check.outputs.version_mismatch }}"
-          CHECKSUM_NEEDS_UPDATE="${{ needs.checksum-check.outputs.needs_update }}"
-          
-          echo "version_mismatch=$VERSION_MISMATCH" >> $GITHUB_OUTPUT
-          echo "checksum_needs_update=$CHECKSUM_NEEDS_UPDATE" >> $GITHUB_OUTPUT
-          
-          if [ "$VERSION_MISMATCH" = "true" ]; then
-            echo "::notice::Will update version"
+          # Update version if needed
+          if [ "${{ needs.version-check.outputs.version_mismatch }}" = "true" ]; then
+            NEW_VERSION="${{ needs.version-check.outputs.release_version }}"
+            sed -i "s/^pkgver=.*/pkgver=$NEW_VERSION/" PKGBUILD
+            sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+            echo "Updated PKGBUILD to version $NEW_VERSION-1"
           fi
-          if [ "$CHECKSUM_NEEDS_UPDATE" = "true" ]; then
-            echo "::notice::Will update checksums"
-          fi
-
-      - name: Update PKGBUILD version
-        if: needs.version-check.outputs.version_mismatch == 'true'
-        run: |
-          NEW_VERSION="${{ needs.version-check.outputs.release_version }}"
           
-          # Update pkgver in PKGBUILD
-          sed -i "s/^pkgver=.*/pkgver=$NEW_VERSION/" PKGBUILD
+          # Run Arch-specific commands in container
+          docker run --rm -v "$PWD:/workspace" -w /workspace archlinux:latest bash -c '
+            set -e
+            pacman -Syu --noconfirm
+            pacman -S --noconfirm base-devel pacman-contrib
+            useradd -m builder
+            chown -R builder:builder .
+            sudo -u builder updpkgsums
+            sudo -u builder makepkg --printsrcinfo > .SRCINFO
+            echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+            sudo -u builder makepkg --syncdeps --noconfirm --log
+          '
           
-          # Reset pkgrel to 1 for new version
-          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
-          
-          echo "::notice::Updated PKGBUILD to version $NEW_VERSION-1"
-
-      - name: Update checksums
-        run: |
-          useradd -m builder
-          chown -R builder:builder .
-          sudo -u builder updpkgsums
-          echo "::notice::Checksums updated"
-
-      - name: Update .SRCINFO
-        run: |
-          sudo -u builder makepkg --printsrcinfo > .SRCINFO
-          echo "::notice::.SRCINFO updated"
-
-      - name: Verify package builds
-        run: |
-          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-          sudo -u builder makepkg --syncdeps --noconfirm --log
-          echo "::notice::Package builds successfully ✓"
+          echo "::notice::PKGBUILD updated and verified"
 
       - name: Generate PR details
         id: pr_details
@@ -289,21 +260,15 @@ jobs:
           CHECKSUM_NEEDS_UPDATE="${{ needs.checksum-check.outputs.needs_update }}"
           
           if [ "$VERSION_MISMATCH" = "true" ] && [ "$CHECKSUM_NEEDS_UPDATE" = "true" ]; then
-            TITLE="📦 Update PKGBUILD version and checksums"
-            BRANCH="update-version-checksums-${{ github.run_number }}"
-            echo "type=version-and-checksums" >> $GITHUB_OUTPUT
+            echo "title=📦 Update PKGBUILD version and checksums" >> $GITHUB_OUTPUT
+            echo "branch=update-version-checksums-${{ github.run_number }}" >> $GITHUB_OUTPUT
           elif [ "$VERSION_MISMATCH" = "true" ]; then
-            TITLE="📦 Update PKGBUILD to version ${{ needs.version-check.outputs.release_version }}"
-            BRANCH="update-version-${{ needs.version-check.outputs.release_version }}-${{ github.run_number }}"
-            echo "type=version-only" >> $GITHUB_OUTPUT
+            echo "title=📦 Update PKGBUILD to version ${{ needs.version-check.outputs.release_version }}" >> $GITHUB_OUTPUT
+            echo "branch=update-version-${{ needs.version-check.outputs.release_version }}-${{ github.run_number }}" >> $GITHUB_OUTPUT
           else
-            TITLE="🔐 Update package checksums"
-            BRANCH="update-checksums-${{ github.run_number }}"
-            echo "type=checksums-only" >> $GITHUB_OUTPUT
+            echo "title=🔐 Update package checksums" >> $GITHUB_OUTPUT
+            echo "branch=update-checksums-${{ github.run_number }}" >> $GITHUB_OUTPUT
           fi
-          
-          echo "title=$TITLE" >> $GITHUB_OUTPUT
-          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v6
