@@ -267,6 +267,7 @@ jobs:
           fi
 
       - name: Create Pull Request
+        id: cpr
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.PAT_TOKEN }}
@@ -313,6 +314,11 @@ jobs:
             ${{ needs.version-check.outputs.version_mismatch == 'true' && 'version-update' || '' }}
             ${{ needs.checksum-check.outputs.needs_update == 'true' && 'checksums' || '' }}
 
+      - name: Enable Pull Request Automerge
+        if: steps.cpr.outputs.pull-request-operation == 'created'
+        run: gh pr merge --squash --auto "${{ steps.cpr.outputs.pull-request-number }}"
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
 
   summary:
     name: Validation Summary
