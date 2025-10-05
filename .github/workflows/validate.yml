@@ -59,7 +59,7 @@ jobs:
           ref: ${{ needs.determine-target.outputs.target_branch }}
 
       - name: Validate AUR package
-        uses: hapakaien/archlinux-package-action@v2
+        uses: heyhusen/archlinux-package-action@v2
         with:
           namcap: true
           updpkgsums: false
