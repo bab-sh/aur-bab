@@ -416,7 +416,9 @@ jobs:
 
       - name: Enable Pull Request Automerge
         if: steps.cpr.outputs.pull-request-operation == 'created'
-        run: gh pr merge --squash --auto "${{ steps.cpr.outputs.pull-request-number }}"
+        run: |
+          gh pr merge --squash --auto --delete-branch "${{ steps.cpr.outputs.pull-request-number }}"
+          echo "::notice::Automerge enabled with automatic branch deletion"
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
 
