@@ -1,0 +1,12 @@
+# Build artifacts
+*.pkg.tar.*
+*.tar.gz
+*.tar.xz
+*.tar.zst
+
+# makepkg build directories
+src/
+pkg/
+
+# Log files
+*.log
