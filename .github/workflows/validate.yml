@@ -114,7 +114,7 @@ jobs:
       - name: Get latest release version
         id: release
         run: |
-          LATEST_RELEASE=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/latest" | jq -r '.tag_name // empty')
+          LATEST_RELEASE=$(curl -s "https://api.github.com/repos/bab-sh/bab/releases/latest" | jq -r '.tag_name // empty')
           
           if [ -z "$LATEST_RELEASE" ]; then
             echo "::warning::No releases found in repository"
